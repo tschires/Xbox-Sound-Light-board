@@ -1,13 +1,33 @@
-<!DOCTYPE html>
+<!doctype html>
 <html>
 <head>
-  <title>Sound Manager</title>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ESP32 Sound Manager</title>
 </head>
 <body>
-  <h2>Upload new boot sound (boot.wav)</h2>
-  <form method="POST" action="/upload" enctype="multipart/form-data">
-    <input type="file" name="file">
-    <input type="submit" value="Upload">
-  </form>
+<h1>XBOX Sound Mod Manager</h1>
+<div id="files">Loading...</div>
+<form method="POST" action="/upload" enctype="multipart/form-data">
+  <input type="file" name="data" accept=".wav" required>
+  <input type="submit" value="Upload WAV">
+</form>
+<script>
+function loadFiles(){
+  fetch('/list').then(r=>r.json()).then(files=>{
+    const el=document.getElementById('files');
+    if(files.length===0){ el.innerHTML='No files uploaded.'; return; }
+    el.innerHTML='';
+    files.forEach(f=>{
+      const div=document.createElement('div');
+      div.innerHTML = `${f} <button onclick="play('${f}')">Play</button> <button onclick="del('${f}')">Delete</button>`;
+      el.appendChild(div);
+    });
+  });
+}
+function play(file){ fetch('/play?file='+encodeURIComponent(file)); }
+function del(file){ fetch('/delete?file='+encodeURIComponent(file)).then(()=>loadFiles()); }
+window.onload=loadFiles;
+</script>
 </body>
 </html>
