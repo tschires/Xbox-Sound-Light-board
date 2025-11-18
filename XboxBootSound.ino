@@ -13,116 +13,213 @@
  * - Access Web Interface at: http://192.168.4.1/
  */
 
-// --- Standard ESP32 Libraries ---
-#include "WiFi.h"
-#include "WebServer.h"
-#include "FS.h"
-#include "SPIFFS.h"
+#include <WiFi.h>
+#include <WebServer.h>
+#include <SPIFFS.h>
+#include <FS.h>
 
-// --- Audio Libraries (Requires ESP8266Audio library) ---
-#include "AudioFileSourceSPIFFS.h"
-#include "AudioGeneratorWAV.h"
-#include "AudioOutputI2S.h"
+#include <AudioFileSourceSPIFFS.h>
+#include <AudioGeneratorWAV.h>
+#include <AudioOutputI2S.h>
 
-// --- Network Configuration ---
-const char *ssid = "XBOX_SOUND_MOD";
-const char *password = "12345678";
+// WiFi AP
+const char* ssid = "XBOX_SOUND_MOD";
+const char* password = "12345678";
 IPAddress apIP(192, 168, 4, 1);
 
-// --- Web Server Setup ---
+// Web server
 WebServer server(80);
 
-// --- Audio Objects ---
+// Audio objects
 AudioGeneratorWAV *wav = nullptr;
 AudioFileSourceSPIFFS *file = nullptr;
-AudioOutputI2S *out = nullptr; // Used for DAC output
+AudioOutputI2S *out = nullptr;
 
-// --- Global Audio State ---
-bool audioIsPlaying = false;
-unsigned long playbackStartTime = 0;
+bool audioPlaying = false;
 
-// =========================================================
-//              AUDIO DIAGNOSTIC CALLBACKS
-// =========================================================
+// ----------------------------
+// Minimal web page (separate)
+// ----------------------------
+const char* PAGE = 
+"<!DOCTYPE html>"
+"<html>"
+"<head><title>Xbox Sound</title></head>"
+"<body style=\"font-family:Arial;background:#111;color:#eee;padding:20px\">"
+"<h2>Xbox 360 Sound Manager</h2>"
 
-// Called when audio properties are discovered (helpful for debugging format issues)
-void audio_info(const char *name, int value) {
-  Serial.printf("INFO: %s = %d\n", name, value);
-}
+"<h3>Files:</h3>"
+"<div id='list'>Loading...</div>"
 
-// Called when general information is available
-void audio_info(const char *info) {
-  Serial.print("INFO: ");
-  Serial.println(info);
-}
+"<h3>Upload WAV</h3>"
+"<form method='POST' action='/upload' enctype='multipart/form-data'>"
+"<input type='file' name='data' accept='.wav'>"
+"<input type='submit' value='Upload'>"
+"</form>"
 
-// Called when an error occurs during decoding or playback
-void audio_error(const char *info) {
-  Serial.print("AUDIO ERROR: ");
-  Serial.println(info);
-}
+"<script>"
+"function loadList() {"
+"  fetch('/list').then(function(r){ return r.json(); }).then(function(files){"
+"    var html='';"
+"    for (var i=0;i<files.length;i++) {"
+"      var f = files[i];"
+"      html += f + "
+"        \" <button onclick=\\\"fetch('/play?f=\" + f + \"')\\\">Play</button>\" + "
+"        \" <button onclick=\\\"fetch('/delete?f=\" + f + \"').then(function(){ loadList(); })\\\">Delete</button><br>\";"
+"    }"
+"    document.getElementById('list').innerHTML = html ? html : 'No files';"
+"  });"
+"}"
+"loadList();"
+"</script>"
 
-// Called when WAV file reaches the end
-void audio_eof_wav(const char *info) {
-  Serial.println("INFO: WAV file finished (End Of File)");
-}
+"</body>"
+"</html>";
 
-// (Other callbacks required by the library, but not used for WAV)
-void audio_id3data(const char *info) {}
-void audio_showstation(const char *info) {}
-void audio_showstreamtitle(const char *info) {}
+// ----------------------------
+// Audio control
+// ----------------------------
 
-
-// =========================================================
-//                  AUDIO FUNCTIONS
-// =========================================================
-
-// Function to stop audio playback and clean up memory
 void stopAudio() {
-  if (wav && wav->isRunning()) {
-    wav->stop();
-    Serial.println("Audio stopped.");
-  }
   if (wav) {
+    if (wav->isRunning()) wav->stop();
     delete wav;
     wav = nullptr;
   }
-  if (file) {
-    delete file;
-    file = nullptr;
-  }
-  audioIsPlaying = false;
+  if (file) { delete file; file = nullptr; }
+  audioPlaying = false;
 }
 
-// Function to start playing a specific file
-void startAudio(const char *filename) {
-  stopAudio(); // Stop anything currently playing
-  
-  if (!SPIFFS.exists(filename)) {
-    Serial.printf("Error: File not found: %s\n", filename);
+void startAudio(const char *fname) {
+  stopAudio();
+
+  if (!SPIFFS.exists(fname)) {
+    Serial.printf("File missing: %s\n", fname);
     return;
   }
 
-  // Initialize and start playback
-  file = new AudioFileSourceSPIFFS(filename);
+  file = new AudioFileSourceSPIFFS(fname);
   wav = new AudioGeneratorWAV();
-  
-  if (wav->begin(file, out)) {
-    Serial.printf("Playing WAV file: %s\n", filename);
-    audioIsPlaying = true;
-    playbackStartTime = millis();
-  } else {
-    Serial.println("Error starting WAV decoder!");
+
+  Serial.printf("Start WAV: %s\n", fname);
+
+  if (!wav->begin(file, out)) {
+    Serial.println("WAV decoder failed");
     stopAudio();
+    return;
   }
+
+  audioPlaying = true;
 }
 
-// Function to handle the continuous audio loop
 void audioLoop() {
   if (wav && wav->isRunning()) {
     if (!wav->loop()) {
-      // Sound finished playing
-      Serial.println("Sound finished playing.");
       stopAudio();
     }
   }
+}
+
+// ----------------------------
+// Web handlers
+// ----------------------------
+
+void handleRoot() {
+  server.send(200, "text/html", PAGE);
+}
+
+void handleList() {
+  String json = "[";
+  File root = SPIFFS.open("/");
+  File f = root.openNextFile();
+  bool first = true;
+
+  while (f) {
+    String name = f.name();
+    if (name.endsWith(".wav")) {
+      if (!first) json += ",";
+      first = false;
+      json += "\"" + name.substring(1) + "\"";
+    }
+    f = root.openNextFile();
+  }
+
+  json += "]";
+  server.send(200, "application/json", json);
+}
+
+void handlePlay() {
+  if (!server.hasArg("f")) {
+    server.send(400, "text/plain", "Missing f");
+    return;
+  }
+  String file = "/" + server.arg("f");
+  startAudio(file.c_str());
+  server.send(200, "text/plain", "playing");
+}
+
+void handleDelete() {
+  if (!server.hasArg("f")) {
+    server.send(400, "text/plain", "Missing f");
+    return;
+  }
+  String file = "/" + server.arg("f");
+  stopAudio();
+  SPIFFS.remove(file);
+  server.send(200, "text/plain", "deleted");
+}
+
+// File upload
+File uploadFile;
+
+void handleUpload() {
+  HTTPUpload& upload = server.upload();
+
+  if (upload.status == UPLOAD_FILE_START) {
+    String filename = "/" + upload.filename;
+    if (!filename.endsWith(".wav")) return;
+
+    uploadFile = SPIFFS.open(filename, "w");
+
+  } else if (upload.status == UPLOAD_FILE_WRITE) {
+    if (uploadFile) uploadFile.write(upload.buf, upload.currentSize);
+
+  } else if (upload.status == UPLOAD_FILE_END) {
+    if (uploadFile) uploadFile.close();
+  }
+}
+
+// ----------------------------
+// Setup
+// ----------------------------
+
+void setup() {
+  Serial.begin(115200);
+  SPIFFS.begin(true);
+
+  // I2S in DAC mode (GPIO25)
+  out = new AudioOutputI2S(0, 1);   // internal DAC
+  out->SetOutputModeMono(true);     // mono = more stable
+  out->SetGain(1.0);
+
+  WiFi.softAP(ssid, password);
+  WiFi.softAPConfig(apIP, apIP, IPAddress(255,255,255,0));
+
+  server.on("/", handleRoot);
+  server.on("/list", handleList);
+  server.on("/play", handlePlay);
+  server.on("/delete", handleDelete);
+  server.on("/upload", HTTP_POST, [](){ server.send(200); }, handleUpload);
+
+  server.begin();
+  Serial.println("Ready on http://192.168.4.1/");
+}
+
+// ----------------------------
+// Loop
+// ----------------------------
+
+void loop() {
+  server.handleClient();
+  audioLoop();
+}
+
