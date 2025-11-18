@@ -10,6 +10,7 @@ But for now, I hope to get something to function and maybe meet some people alon
 Help out with a little winter project.
 
 
+Once I get a DFPlayer mini or a IS2 amp this will change, and the code.
 
  * Xbox 360 Boot Sound Player (Internal DAC Version)
  *
