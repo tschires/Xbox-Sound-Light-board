@@ -1,84 +1,128 @@
+/*
+ * Xbox 360 Sound Manager & Player - AP Mode
+ * * This sketch creates an Access Point (AP) and hosts a web server
+ * allowing file uploads (.wav), file listing, and playback control.
+ * It uses the ESP32's internal DAC (GPIO 25) for sound output.
+ * * * HARDWARE NOTES:
+ * - Speaker must be connected to GPIO 25 and GND.
+ * - This version omits the sense pin logic for simplicity during testing.
+ *
+ * * WEB ACCESS:
+ * - SSID: "XBOX_SOUND_MOD"
+ * - Password: "12345678"
+ * - Access Web Interface at: http://192.168.4.1/
+ */
+
+// --- Standard ESP32 Libraries ---
+#include "WiFi.h"
+#include "WebServer.h"
+#include "FS.h"
 #include "SPIFFS.h"
+
+// --- Audio Libraries (Requires ESP8266Audio library) ---
 #include "AudioFileSourceSPIFFS.h"
-#include "AudioGeneratorWAV.h" // *** CHANGED from AudioGeneratorMP3 ***
-#include "AudioOutputI2S.h"    // Yes, I2S, but we'll set it to DAC mode
+#include "AudioGeneratorWAV.h"
+#include "AudioOutputI2S.h"
 
-// --- Define your sound file ---
-const char* BOOT_SOUND_FILE = "/bootsound.wav"; // *** CHANGED to .wav ***
+// --- Network Configuration ---
+const char *ssid = "XBOX_SOUND_MOD";
+const char *password = "12345678";
+IPAddress apIP(192, 168, 4, 1);
 
-// --- Define Pins ---
-// (Sense pin is removed for automatic playback)
-// GPIO 25 is used by the DAC, so we don't need a define
+// --- Web Server Setup ---
+WebServer server(80);
 
 // --- Audio Objects ---
-AudioGeneratorWAV *wav; // *** CHANGED to wav object ***
-AudioFileSourceSPIFFS *file;
-AudioOutputI2S *out; // This object can also control the internal DAC
+AudioGeneratorWAV *wav = nullptr;
+AudioFileSourceSPIFFS *file = nullptr;
+AudioOutputI2S *out = nullptr; // Used for DAC output
 
-// State variable
-// (Removed for automatic playback)
-// bool xboxIsOn = false;
+// --- Global Audio State ---
+bool audioIsPlaying = false;
+unsigned long playbackStartTime = 0;
 
-void setup() {
-  Serial.begin(115200);
-  Serial.println("\nInitializing Internal DAC Boot Sound Player (WAV)...");
+// =========================================================
+//              AUDIO DIAGNOSTIC CALLBACKS
+// =========================================================
 
-  // Set the sense pin as an input
-  // pinMode(XBOX_SENSE_PIN, INPUT); // (Removed)
+// Called when audio properties are discovered (helpful for debugging format issues)
+void audio_info(const char *name, int value) {
+  Serial.printf("INFO: %s = %d\n", name, value);
+}
 
-  // --- Initialize SPIFFS ---
-  if (!SPIFFS.begin(true)) {
-    Serial.println("An Error has occurred while mounting SPIFFS");
+// Called when general information is available
+void audio_info(const char *info) {
+  Serial.print("INFO: ");
+  Serial.println(info);
+}
+
+// Called when an error occurs during decoding or playback
+void audio_error(const char *info) {
+  Serial.print("AUDIO ERROR: ");
+  Serial.println(info);
+}
+
+// Called when WAV file reaches the end
+void audio_eof_wav(const char *info) {
+  Serial.println("INFO: WAV file finished (End Of File)");
+}
+
+// (Other callbacks required by the library, but not used for WAV)
+void audio_id3data(const char *info) {}
+void audio_showstation(const char *info) {}
+void audio_showstreamtitle(const char *info) {}
+
+
+// =========================================================
+//                  AUDIO FUNCTIONS
+// =========================================================
+
+// Function to stop audio playback and clean up memory
+void stopAudio() {
+  if (wav && wav->isRunning()) {
+    wav->stop();
+    Serial.println("Audio stopped.");
+  }
+  if (wav) {
+    delete wav;
+    wav = nullptr;
+  }
+  if (file) {
+    delete file;
+    file = nullptr;
+  }
+  audioIsPlaying = false;
+}
+
+// Function to start playing a specific file
+void startAudio(const char *filename) {
+  stopAudio(); // Stop anything currently playing
+  
+  if (!SPIFFS.exists(filename)) {
+    Serial.printf("Error: File not found: %s\n", filename);
     return;
   }
-  Serial.println("SPIFFS mounted.");
 
-  // Check if the sound file exists
-  if (!SPIFFS.exists(BOOT_SOUND_FILE)) {
-    Serial.print("ERROR: Boot sound file not found: ");
-    Serial.println(BOOT_SOUND_FILE);
-    Serial.println("Please upload the WAV file using 'ESP32 Sketch Data Upload'");
-  } else {
-    Serial.println("Boot sound file found.");
-  }
-
-  // --- Initialize Audio Objects ---
-  // We are not creating them yet, just setting pointers to null
-  wav = nullptr; // *** CHANGED ***
-  file = nullptr;
+  // Initialize and start playback
+  file = new AudioFileSourceSPIFFS(filename);
+  wav = new AudioGeneratorWAV();
   
-  // This is the magic line:
-  // new AudioOutputI2S(0, 1) means: (port 0, mode 1)
-  // Mode 1 = Internal DAC. Mode 0 = External I2S.
-  out = new AudioOutputI2S(0, 1); 
-  out->SetGain(1.0); // Set volume (0.0 to 4.0)
-
-  // Check initial power state
-  // (Removed - we will just play the sound immediately)
-
-  // --- Start playing sound immediately ---
-  Serial.println("Playing boot sound automatically...");
-  file = new AudioFileSourceSPIFFS(BOOT_SOUND_FILE);
-  wav = new AudioGeneratorWAV(); // *** CHANGED ***
-  if (!wav->begin(file, out)) { // *** CHANGED ***
+  if (wav->begin(file, out)) {
+    Serial.printf("Playing WAV file: %s\n", filename);
+    audioIsPlaying = true;
+    playbackStartTime = millis();
+  } else {
     Serial.println("Error starting WAV decoder!");
-    delete wav; wav = nullptr; // *** CHANGED ***
-    delete file; file = nullptr;
+    stopAudio();
   }
 }
 
-void loop() {
-  // The main loop *must* call wav->loop() to keep the sound playing
-  if (wav && wav->isRunning()) { // *** CHANGED ***
-    if (!wav->loop()) { // *** CHANGED ***
+// Function to handle the continuous audio loop
+void audioLoop() {
+  if (wav && wav->isRunning()) {
+    if (!wav->loop()) {
       // Sound finished playing
-      wav->stop(); // *** CHANGED ***
-      delete wav; wav = nullptr; // *** CHANGED ***
-      delete file; file = nullptr;
-      Serial.println("Sound finished.");
+      Serial.println("Sound finished playing.");
+      stopAudio();
     }
   }
-
-  // A small delay
-  delay(50); // A bit shorter delay for smoother audio processing
-}
